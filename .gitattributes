@@ -1,0 +1,14 @@
+* text=auto
+
+*.dll binary
+*.lib binary
+*.png binary
+
+# Generated embedded font data intentionally preserves generator formatting.
+SKJH/Font.h whitespace=-trailing-space
+SKJH/ImGui/** whitespace=-trailing-space
+SKJH/vmmdll.h whitespace=-trailing-space
+SKJH/dma_kapi.h whitespace=-trailing-space
+SKJH/GameMatrix.h whitespace=-trailing-space
+SKJH/MyImGui.h whitespace=-trailing-space
+SKJH/SKJH.cpp whitespace=-trailing-space

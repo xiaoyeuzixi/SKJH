@@ -1,0 +1,43 @@
+# Visual Studio and build outputs
+.vs/
+**/x64/
+**/Debug/
+**/Release/
+*.obj
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+*.tlog
+*.lastbuildstate
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+*.log
+
+# Local Codex/agent state
+.agents/
+.codex/
+
+# Generated SDK exports and decompilation output
+/script.json
+/dump.cs
+/il2cpp.h
+/stringliteral.json
+/DummyDll/
+/skjh_sdk.cache
+
+# Runtime diagnostics and local visual checks
+/dma_probe*.json
+/player_intel_probe*.json
+/player_probe*.json
+/ui_preview_*.png
+
+# Local secrets and certificates
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
