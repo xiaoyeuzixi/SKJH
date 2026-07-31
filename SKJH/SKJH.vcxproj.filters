@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="源文件">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="头文件">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="SKJH模块">
+      <UniqueIdentifier>{a1a1a1a1-1111-1111-1111-111111111111}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="DMA框架">
+      <UniqueIdentifier>{b2b2b2b2-2222-2222-2222-222222222222}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="UI渲染">
+      <UniqueIdentifier>{c3c3c3c3-3333-3333-3333-333333333333}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ImGui">
+      <UniqueIdentifier>{d4d4d4d4-4444-4444-4444-444444444444}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="库文件">
+      <UniqueIdentifier>{e5e5e5e5-5555-5555-5555-555555555555}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="MyImGui.cpp">
+      <Filter>UI渲染</Filter>
+    </ClCompile>
+    <ClCompile Include="ImGui\imgui.cpp">
+      <Filter>ImGui</Filter>
+    </ClCompile>
+    <ClCompile Include="ImGui\imgui_draw.cpp">
+      <Filter>ImGui</Filter>
+    </ClCompile>
+    <ClCompile Include="ImGui\imgui_tables.cpp">
+      <Filter>ImGui</Filter>
+    </ClCompile>
+    <ClCompile Include="ImGui\imgui_widgets.cpp">
+      <Filter>ImGui</Filter>
+    </ClCompile>
+    <ClCompile Include="ImGui\imgui_impl_dx11.cpp">
+      <Filter>ImGui</Filter>
+    </ClCompile>
+    <ClCompile Include="ImGui\imgui_impl_win32.cpp">
+      <Filter>ImGui</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Mem.h">
+      <Filter>DMA框架</Filter>
+    </ClInclude>
+    <ClInclude Include="DMAKey.h">
+      <Filter>DMA框架</Filter>
+    </ClInclude>
+    <ClInclude Include="dma_kapi.h">
+      <Filter>DMA框架</Filter>
+    </ClInclude>
+    <ClInclude Include="leechcore.h">
+      <Filter>DMA框架</Filter>
+    </ClInclude>
+    <ClInclude Include="vmmdll.h">
+      <Filter>DMA框架</Filter>
+    </ClInclude>
+    <ClInclude Include="Throttler.h">
+      <Filter>DMA框架</Filter>
+    </ClInclude>
+    <ClInclude Include="Overlay.h">
+      <Filter>UI渲染</Filter>
+    </ClInclude>
+    <ClInclude Include="OverlayImGui.h">
+      <Filter>UI渲染</Filter>
+    </ClInclude>
+    <ClInclude Include="BlackOverlayImGui.h">
+      <Filter>UI渲染</Filter>
+    </ClInclude>
+    <ClInclude Include="MyImGui.h">
+      <Filter>UI渲染</Filter>
+    </ClInclude>
+    <ClInclude Include="Font.h">
+      <Filter>UI渲染</Filter>
+    </ClInclude>
+    <ClInclude Include="HoloUI.h">
+      <Filter>UI渲染</Filter>
+    </ClInclude>
+    <ClInclude Include="GameMatrix.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="Offset.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="ESPUtils.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="BoneEnum.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="ItemMap.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="main.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="SKJH_Property.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="SKJH_Entity.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="SKJH_Skeleton.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="SdkResolver.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="UnityTransform.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="TemplateCatalog.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="AimDevice.h">
+      <Filter>SKJH模块</Filter>
+    </ClInclude>
+    <ClInclude Include="ImGui\imgui.h">
+      <Filter>ImGui</Filter>
+    </ClInclude>
+    <ClInclude Include="ImGui\imgui_internal.h">
+      <Filter>ImGui</Filter>
+    </ClInclude>
+    <ClInclude Include="ImGui\imconfig.h">
+      <Filter>ImGui</Filter>
+    </ClInclude>
+    <ClInclude Include="ImGui\imstb_textedit.h">
+      <Filter>ImGui</Filter>
+    </ClInclude>
+    <ClInclude Include="ImGui\imgui_impl_dx11.h">
+      <Filter>ImGui</Filter>
+    </ClInclude>
+    <ClInclude Include="ImGui\imgui_impl_win32.h">
+      <Filter>ImGui</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Library Include="leechcore.lib">
+      <Filter>库文件</Filter>
+    </Library>
+    <Library Include="vmm.lib">
+      <Filter>库文件</Filter>
+    </Library>
+    <Library Include="FTD3XX.lib">
+      <Filter>库文件</Filter>
+    </Library>
+  </ItemGroup>
+</Project>
