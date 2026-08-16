@@ -1,33 +1,32 @@
 # SKJH
 
-Windows x64 C++ project using DirectX 11, ImGui, and the bundled DMA SDK dependencies.
+基于 Windows x64 的 C++ 项目，使用 DirectX 11、ImGui 以及内置的 DMA SDK 依赖库。
 
-## Features
+## 功能特性
 
-- DMA-based memory reading for game entity data (ESP, skeleton, item detection)
-- DirectX 11 overlay rendering with ImGui
-- Automated SDK export and signature probing
-- Runtime diagnostics and validation tooling
+- 基于 DMA 的内存读取，用于获取游戏实体数据（ESP、骨骼、物品检测）
+- DirectX 11 叠加层渲染，集成 ImGui 界面
+- 自动化 SDK 导出与签名探测
+- 运行时诊断与验证工具链
 
-## Build
+## 编译
 
-Open `SKJH.sln` in Visual Studio and build `Release | x64`, or run:
+在 Visual Studio 中打开 `SKJH.sln`，选择 `Release | x64` 进行编译，或通过命令行运行：
 
 ```powershell
 & "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" `
   ".\SKJH.sln" /m /p:Configuration=Release /p:Platform=x64
 ```
 
-Generated SDK exports, runtime diagnostics, local caches, and build outputs are intentionally excluded from version control.
+SDK 导出文件、运行时诊断产物、本地缓存及编译输出均已排除在版本控制之外。
 
-## SDK Update
+## SDK 更新
 
-The current compiled profile matches the `8.16` export in
-`SKJH DummyDll 8.16.7z`. The required `dump.cs` and `script.json` files are
-kept under `SKJH DummyDll 8.16/`; the resolver retains older compiled
-profiles as diagnostic fallbacks.
+当前编译的配置文件对应 `SKJH DummyDll 8.16.7z` 中的 `8.16` 导出。
+所需的 `dump.cs` 和 `script.json` 文件位于 `SKJH DummyDll 8.16/` 目录下；
+解析器会保留旧版编译配置作为诊断回退。
 
-Run the update checks from the solution root after rebuilding:
+重新编译后，在解决方案根目录运行以下更新检查命令：
 
 ```powershell
 .\x64\Release\SKJH.exe --sdk-check
@@ -37,38 +36,35 @@ Run the update checks from the solution root after rebuilding:
 .\x64\Release\SKJH.exe --player-probe --timeout=30000 --probe-out=player_probe.json
 ```
 
-To check the DMA device and enumerate the remote process without waiting for
-the renderer, run:
+如需检查 DMA 设备并枚举远程进程（无需等待渲染器），可运行：
 
 ```powershell
 .\x64\Release\SKJH.exe --dma-check --target-process=SKJH.exe
 ```
 
-All online checks expect the game process to be running on the DMA target.
+所有在线检查命令均要求游戏进程在 DMA 目标机上运行。
 
-## DMA module export
+## DMA 模块导出
 
-The active 8.16 SDK is selected automatically from `SKJH DummyDll 8.16/` and
-cached beside that export. To capture a target module from the remote DMA
-machine, run the following from the solution root:
+程序会自动从 `SKJH DummyDll 8.16/` 中选择当前生效的 8.16 SDK 并缓存。
+如需从远程 DMA 主机捕获目标模块，在解决方案根目录运行：
 
 ```powershell
 .\x64\Release\SKJH.exe --memory-export=GameAssembly.dll `
   --target-process=SKJH.exe --timeout=30000 --export-out=dma_export
 ```
 
-The command writes `GameAssembly.dll.mem.bin`, `GameAssembly.dll.memory.json`,
-and `GameAssembly.dll.exports.json`. The binary is a virtual-image dump in
-module-image order; the JSON manifest records the remote base, image size, and
-any unreadable 4 KiB pages. `--export-functions=GameAssembly.dll` can be used
-alone when only the module's EAT is needed.
+该命令将生成 `GameAssembly.dll.mem.bin`、`GameAssembly.dll.memory.json`
+和 `GameAssembly.dll.exports.json`。二进制文件为按模块映像顺序排列的虚拟映像转储；
+JSON 清单记录了远程基址、映像大小及不可读的 4 KiB 页面信息。
+若仅需模块的导出地址表（EAT），可单独使用 `--export-functions=GameAssembly.dll`。
 
-## Contact / QQ Group
+## 交流群
 
-**QQ交流群：835775657**
+**QQ 交流群：835775657**
 
-欢迎加入交流群讨论项目相关问题和开发进展。
+欢迎加入交流群讨论项目相关问题与开发进展。
 
-## License
+## 许可声明
 
-This project is provided for educational and research purposes only.
+本项目仅供教育与学习研究用途。
