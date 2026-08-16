@@ -244,5 +244,7 @@ inline bool SKJH_HasBones(int type) {
 
 // ===================== 是否显示血条 =====================
 inline bool SKJH_HasHealth(int type) {
+    // NPCEntity does not expose Hp/MaxHp in the current SDK.  Do not apply
+    // the player health filter to it by guessing at unrelated property IDs.
     return type == SKJH_PLAYER || type == SKJH_MONSTER || type == SKJH_PART;
 }

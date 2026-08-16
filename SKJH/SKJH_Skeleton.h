@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -48,11 +49,25 @@ inline std::unordered_map<int64_t, DWORD64> SKJH_ReadEntityGoMap(size_t limit = 
     if (capacity <= 0 || capacity > static_cast<int32_t>(limit * 2)) return result;
     const int32_t scanCount = count < capacity ? count : capacity;
     result.reserve(scanCount);
+    constexpr size_t kEntrySize = 0x18;
+    std::vector<unsigned char> rawEntries(
+        static_cast<size_t>(scanCount) * kEntrySize);
+    const DWORD64 firstEntry = entries + 0x20;
+    const DWORD byteCount = static_cast<DWORD>(rawEntries.size());
+    if (!mem.Read(firstEntry, rawEntries.data(), byteCount) &&
+        !mem.ReadMeta(firstEntry, rawEntries.data(), byteCount)) {
+        return result;
+    }
     for (int32_t index = 0; index < scanCount; ++index) {
-        const DWORD64 entry = entries + 0x20 + static_cast<DWORD64>(index) * 0x18;
-        if (mem.Read<int32_t>(entry) < 0) continue;
-        const int64_t entityId = mem.Read<int64_t>(entry + 0x08);
-        const DWORD64 entityGo = mem.Read<DWORD64>(entry + 0x10);
+        const unsigned char* entry = rawEntries.data() +
+            static_cast<size_t>(index) * kEntrySize;
+        int32_t hashCode = -1;
+        int64_t entityId = 0;
+        DWORD64 entityGo = 0;
+        std::memcpy(&hashCode, entry, sizeof(hashCode));
+        std::memcpy(&entityId, entry + 0x08, sizeof(entityId));
+        std::memcpy(&entityGo, entry + 0x10, sizeof(entityGo));
+        if (hashCode < 0) continue;
         if (entityId && Mem::IsUserAddress(entityGo)) result.emplace(entityId, entityGo);
     }
     return result;
@@ -1812,6 +1827,204 @@ inline bool SKJH_ReadPlayerRoot(DWORD64 playerGo, DWORD64 entity,
     if (!transform.valid || !SKJH_IsFiniteVector(transform.position)) return false;
     rootPosition = transform.position;
     return true;
+}
+
+struct SKJH_PlayerRootBatchRequest {
+    DWORD64 playerGo = 0;
+    DWORD64 entity = 0;
+};
+
+struct SKJH_PlayerRootBatchResult {
+    FVector position{};
+    bool valid = false;
+    int hierarchyDepth = 0;
+};
+
+// Resolve all player roots with a small number of scatter round trips. The
+// scalar SKJH_ReadUnityTransform path is reliable but costs several DMA calls
+// per actor; at dozens of players that turns one root refresh into hundreds of
+// milliseconds. This pipeline batches each dependency level for every actor.
+inline size_t SKJH_ReadPlayerRootsBatch(
+        const std::vector<SKJH_PlayerRootBatchRequest>& requests,
+        std::vector<SKJH_PlayerRootBatchResult>& results) {
+    results.assign(requests.size(), {});
+    if (requests.empty() || !mem.hVMM || !mem.pid) return 0;
+
+    struct Work {
+        DWORD64 backReference = 0;
+        DWORD64 managedTransform = 0;
+        DWORD64 nativeTransform = 0;
+        DWORD64 transformData = 0;
+        DWORD64 transforms = 0;
+        DWORD64 parents = 0;
+        int32_t index = -1;
+        int32_t parent = -2;
+        int32_t nextParent = -2;
+        SKJH_UnityTransformNode node{};
+        SKJH_UnityTransformNode parentNode{};
+        FVector position{};
+        SKJH_Quaternion rotation{};
+        int depth = 0;
+        bool active = false;
+    };
+    std::vector<Work> work(requests.size());
+    VMMDLL_SCATTER_HANDLE scatter = mem.CreateScatter();
+    if (!scatter) return 0;
+
+    for (size_t index = 0; index < requests.size(); ++index) {
+        const auto& request = requests[index];
+        if (!Mem::IsUserAddress(request.playerGo) ||
+            !Mem::IsUserAddress(request.entity)) {
+            continue;
+        }
+        mem.AddScatter(scatter,
+            request.playerGo + g_RuntimeOffsets.basePlayerGoEntity,
+            &work[index].backReference);
+        mem.AddScatter(scatter,
+            request.playerGo + g_RuntimeOffsets.basePlayerGoRootBone,
+            &work[index].managedTransform);
+    }
+    mem.ExecuteScatter(scatter);
+
+    for (size_t index = 0; index < requests.size(); ++index) {
+        Work& value = work[index];
+        const auto& request = requests[index];
+        bool matching = value.backReference == request.entity;
+        if (!matching && Mem::IsUserAddress(value.backReference)) {
+            matching = SKJH_HasMatchingPlayerEntity(
+                request.playerGo, request.entity);
+        }
+        if (!matching || !Mem::IsUserAddress(value.managedTransform)) continue;
+        mem.AddScatter(scatter,
+            value.managedTransform + g_RuntimeOffsets.unityObjectCachedPtr,
+            &value.nativeTransform);
+    }
+    mem.ExecuteScatter(scatter);
+
+    for (Work& value : work) {
+        if (!Mem::IsUserAddress(value.nativeTransform)) continue;
+        mem.AddScatter(scatter,
+            value.nativeTransform + g_RuntimeOffsets.unityNativeData,
+            &value.transformData);
+        mem.AddScatter(scatter,
+            value.nativeTransform + g_RuntimeOffsets.unityNativeIndex,
+            &value.index);
+    }
+    mem.ExecuteScatter(scatter);
+
+    for (Work& value : work) {
+        if (!Mem::IsUserAddress(value.transformData) || value.index < 0 ||
+            value.index > 1000000) {
+            continue;
+        }
+        mem.AddScatter(scatter,
+            value.transformData + g_RuntimeOffsets.unityDataTransforms,
+            &value.transforms);
+        mem.AddScatter(scatter,
+            value.transformData + g_RuntimeOffsets.unityDataParents,
+            &value.parents);
+    }
+    mem.ExecuteScatter(scatter);
+
+    for (Work& value : work) {
+        if (!Mem::IsUserAddress(value.transforms) ||
+            !Mem::IsUserAddress(value.parents) || value.index < 0) {
+            continue;
+        }
+        const DWORD64 nodeAddress = value.transforms +
+            static_cast<DWORD64>(value.index) *
+                g_RuntimeOffsets.unityTransformStride;
+        const DWORD64 parentAddress = value.parents +
+            static_cast<DWORD64>(value.index) * sizeof(int32_t);
+        mem.AddScatter(scatter, nodeAddress, &value.node, sizeof(value.node));
+        mem.AddScatter(scatter, parentAddress, &value.parent);
+    }
+    mem.ExecuteScatter(scatter);
+
+    for (Work& value : work) {
+        value.position = {value.node.px, value.node.py, value.node.pz};
+        value.rotation = {
+            value.node.qx, value.node.qy, value.node.qz, value.node.qw};
+        value.active = Mem::IsUserAddress(value.transforms) &&
+            Mem::IsUserAddress(value.parents) && value.index >= 0 &&
+            SKJH_IsFiniteVector(value.position) &&
+            SKJH_NormalizeQuaternion(value.rotation) &&
+            value.parent >= -1 && value.parent <= 1000000;
+    }
+
+    for (int iteration = 0; iteration < 128; ++iteration) {
+        bool anyParent = false;
+        for (Work& value : work) {
+            value.parentNode = {};
+            value.nextParent = -2;
+            if (!value.active || value.parent < 0) continue;
+            anyParent = true;
+            mem.AddScatter(scatter,
+                value.transforms + static_cast<DWORD64>(value.parent) *
+                    g_RuntimeOffsets.unityTransformStride,
+                &value.parentNode, sizeof(value.parentNode));
+            mem.AddScatter(scatter,
+                value.parents + static_cast<DWORD64>(value.parent) *
+                    sizeof(int32_t),
+                &value.nextParent);
+        }
+        if (!anyParent) break;
+        mem.ExecuteScatter(scatter);
+
+        for (Work& value : work) {
+            if (!value.active || value.parent < 0) continue;
+            const FVector scale{
+                value.parentNode.sx,
+                value.parentNode.sy,
+                value.parentNode.sz};
+            SKJH_Quaternion parentRotation{
+                value.parentNode.qx,
+                value.parentNode.qy,
+                value.parentNode.qz,
+                value.parentNode.qw};
+            if (!SKJH_IsFiniteVector(scale) ||
+                !SKJH_NormalizeQuaternion(parentRotation) ||
+                value.nextParent < -1 || value.nextParent > 1000000 ||
+                value.nextParent == value.parent) {
+                value.active = false;
+                continue;
+            }
+            const FVector scaled{
+                value.position.X * scale.X,
+                value.position.Y * scale.Y,
+                value.position.Z * scale.Z};
+            const FVector rotated =
+                SKJH_RotateVector(parentRotation, scaled);
+            value.position = {
+                value.parentNode.px + rotated.X,
+                value.parentNode.py + rotated.Y,
+                value.parentNode.pz + rotated.Z};
+            value.rotation =
+                SKJH_MultiplyQuaternion(parentRotation, value.rotation);
+            ++value.depth;
+            if (!SKJH_IsFiniteVector(value.position) ||
+                !SKJH_NormalizeQuaternion(value.rotation)) {
+                value.active = false;
+                continue;
+            }
+            value.parent = value.nextParent;
+        }
+    }
+    mem.CloseScatter(scatter);
+
+    size_t validCount = 0;
+    for (size_t index = 0; index < work.size(); ++index) {
+        Work& value = work[index];
+        if (!value.active || value.parent >= 0 || value.depth >= 128 ||
+            !SKJH_IsFiniteVector(value.position)) {
+            continue;
+        }
+        results[index].position = value.position;
+        results[index].valid = true;
+        results[index].hierarchyDepth = value.depth;
+        ++validCount;
+    }
+    return validCount;
 }
 
 inline int SKJH_ReadPlayerBones(DWORD64 playerGo, DWORD64 entity,

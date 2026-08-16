@@ -1184,8 +1184,12 @@ inline bool SKJH_RunDmaProbe(const std::filesystem::path& outputPath,
     const bool templatesCovered =
         templateEntityCount == displayTemplateCount;
     const bool catalogRequired = templateEntityCount > 0;
+    // Some configuration tables are legitimately empty in the active game
+    // build (for example CaveLift). Validate the catalog against the entities
+    // actually observed by this probe instead of requiring every optional
+    // table to contain data.
     const bool catalogValid = !catalogRequired ||
-        (catalogRefreshed && templateStats.complete);
+        (templateStats.namesLoaded > 0 && templatesCovered);
     const bool localPlayerValid = Mem::IsUserAddress(localPlayer) &&
         SKJH_IsFiniteVector(camera.localPos) &&
         (camera.localPos.X != 0.0f || camera.localPos.Y != 0.0f ||

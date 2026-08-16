@@ -98,6 +98,18 @@ struct SKJH_EntityEntry {
     std::chrono::steady_clock::time_point playerIntelUpdatedAt{};
 };
 
+// A zero HP value is meaningful only when the entity exposed a valid,
+// positive maximum HP. Keep unknown health data visible so a transient DMA
+// read failure does not make a live player flicker out of the overlay.
+// NPCs are intentionally excluded: the active NPCEntity schema has no
+// Hp/MaxHp pair, so probing guessed property IDs can produce false values.
+inline bool SKJH_ShouldHideDeadActor(const SKJH_EntityEntry& entity) {
+    if (entity.type != SKJH_PLAYER)
+        return false;
+    return std::isfinite(entity.hp) && std::isfinite(entity.maxHp) &&
+        entity.maxHp > 0.0f && entity.hp <= 0.0f;
+}
+
 inline constexpr std::chrono::milliseconds SKJH_ENTITY_TTL{250};
 // A full dictionary pass can miss an actor for a frame while DMA is busy.
 // Keep players briefly so their fixed-position boxes do not blink.
@@ -105,7 +117,10 @@ inline constexpr std::chrono::milliseconds SKJH_PLAYER_TTL{1500};
 // Adapt the display age to measured full-pass cost. It decays gradually so a
 // single fast pass does not discard actors missed by a transient DMA short read.
 inline std::atomic<int64_t> g_BoneFreshnessMs{2500};
-inline constexpr std::chrono::milliseconds SKJH_PLAYER_POSITION_TTL{750};
+inline constexpr std::chrono::milliseconds SKJH_PLAYER_POSITION_TTL{500};
+// Keep the last accepted RootBone visible through a short DMA gap instead of
+// falling back to a lagging network property for one or two frames.
+inline constexpr std::chrono::milliseconds SKJH_PLAYER_ROOT_LAST_GOOD_TTL{500};
 
 inline std::chrono::milliseconds SKJH_BoneFreshnessWindow() {
     return std::chrono::milliseconds(g_BoneFreshnessMs.load(
@@ -209,17 +224,35 @@ struct SKJH_PlayerRootSample {
     DWORD64 entity = 0;
     int32_t classHash = 0;
     FVector position{};
+    FVector entityPosition{};
+    float entityDelta = -1.0f;
+    float frameDelta = -1.0f;
+    uint32_t retainedPasses = 0;
     std::chrono::steady_clock::time_point sampledAt{};
 };
 using SKJH_PlayerRootMap = std::unordered_map<int64_t, SKJH_PlayerRootSample>;
 inline std::shared_mutex g_PlayerRootMutex;
 inline std::shared_ptr<const SKJH_PlayerRootMap> g_PlayerRoots =
     std::make_shared<SKJH_PlayerRootMap>();
-inline std::atomic<int64_t> g_PlayerRootFreshnessMs{1000};
+inline std::atomic<int64_t> g_PlayerRootFreshnessMs{500};
+inline std::atomic<int> g_PlayerRootLastMapCount{0};
+inline std::atomic<int> g_PlayerRootLastValidCount{0};
+inline std::atomic<int64_t> g_PlayerRootLastPassMs{0};
+inline std::atomic<int> g_PlayerRootLastRequestCount{0};
+inline std::atomic<int> g_PlayerRootLastAcceptedCount{0};
+inline std::atomic<int> g_PlayerRootLastRetainedCount{0};
+inline std::atomic<int> g_PlayerRootLastRejectedCount{0};
+inline std::atomic<int> g_PlayerRootLastSpatialRejectCount{0};
+inline std::atomic<int> g_PlayerRootLastMotionRejectCount{0};
 
 inline std::chrono::milliseconds SKJH_PlayerRootFreshnessWindow() {
     return std::chrono::milliseconds(g_PlayerRootFreshnessMs.load(
         std::memory_order_acquire));
+}
+
+inline std::chrono::milliseconds SKJH_PlayerRootDisplayWindow() {
+    const auto measured = SKJH_PlayerRootFreshnessWindow();
+    return (std::max)(measured, SKJH_PLAYER_ROOT_LAST_GOOD_TTL);
 }
 
 inline int64_t SKJH_GetEntitySnapshotKey(int64_t entityId, DWORD64 entity) {
@@ -250,12 +283,11 @@ inline int  g_BindingHotkey = 0;
 
 // ── 通用显示开关 ──
 inline bool g_ShowBox      = true;
-// Skeleton samples are always maintained for stable actor anchors. Rendering
-// is opt-in per actor class. Both player and bot skeletons default on so the
-// user sees bones immediately without toggling UI checkboxes.
-inline bool g_ShowSkeleton = true;
-inline bool g_ShowPlayerSkeleton = true;
-inline bool g_ShowBotSkeleton = true;
+// Skeleton rendering is retired. Sampling stays disabled unless another
+// feature explicitly opts in through these state variables.
+inline bool g_ShowSkeleton = false;
+inline bool g_ShowPlayerSkeleton = false;
+inline bool g_ShowBotSkeleton = false;
 inline std::atomic_bool g_SkeletonSamplingEnabled{false};
 inline std::atomic<uint8_t> g_SkeletonCategoryMask{0};
 
@@ -416,12 +448,14 @@ inline constexpr int kEntityWorkerIntervalMs = 4;
 inline constexpr int kCameraWorkerIntervalMs = 2;
 inline constexpr int kBoneWorkerIntervalMs = 4;
 inline constexpr int kPlayerPositionWorkerIntervalMs = 2;
+inline constexpr int kPlayerRootWorkerIntervalMs = 8;
 
 inline int SleepESP()    { return kEntityWorkerIntervalMs; }
 inline int SleepCamera() { return kCameraWorkerIntervalMs; }
 inline int SleepBones()  { return kBoneWorkerIntervalMs; }
 inline int SleepPlayerIntel() { return 80; }
 inline int SleepPlayerPositions() { return kPlayerPositionWorkerIntervalMs; }
+inline int SleepPlayerRoots() { return kPlayerRootWorkerIntervalMs; }
 
 // ===================== 统计数据 =====================
 inline int g_TypeCount[SKJH_TYPE_COUNT] = {};
@@ -652,14 +686,11 @@ inline bool LoadGlobalConfig() {
     if (g_ItemsHotkeyVK < 1 || g_ItemsHotkeyVK > 255)
         g_ItemsHotkeyVK = VK_F9;
     getBool("ShowBox", g_ShowBox);
-    // Skeleton rendering defaults on. Legacy configurations only had one
-    // skeleton switch; load the per-class values but keep them enabled when
-    // the registry has no saved preference.
-    g_ShowSkeleton = true;
-    g_ShowPlayerSkeleton = true;
-    g_ShowBotSkeleton = true;
-    getBool("PlayerSkeleton", g_ShowPlayerSkeleton);
-    getBool("BotSkeleton", g_ShowBotSkeleton);
+    // Skeleton rendering has been retired. Bone sampling remains available
+    // only when a separate aim feature explicitly requests it.
+    g_ShowSkeleton = false;
+    g_ShowPlayerSkeleton = false;
+    g_ShowBotSkeleton = false;
     SKJH_UpdateSkeletonSamplingState();
     getBool("ShowHealth", g_ShowHealth);
     getBool("ShowWeapon", g_ShowWeapon);
@@ -1078,6 +1109,7 @@ inline void ThreadEntities() {
                     const float dz = entity.pos.Z - camera.localPos.Z;
                     entity.distance = std::sqrt(dx*dx + dy*dy + dz*dz);
                     if (entity.type == SKJH_PLAYER && !entity.isLocalPlayer &&
+                        !SKJH_ShouldHideDeadActor(entity) &&
                         entity.distance < 100.0f) ++threatPlayers;
                 }
                 ++typeCount[entity.type];
@@ -1097,6 +1129,7 @@ inline void ThreadEntities() {
                     SKJH_PruneExpiredBones(retained, now);
                     ++typeCount[retained.type];
                     if (retained.type == SKJH_PLAYER && !retained.isLocalPlayer &&
+                        !SKJH_ShouldHideDeadActor(retained) &&
                         retained.distance < 100.0f) ++threatPlayers;
                     next->push_back(std::move(retained));
                 }
@@ -1162,6 +1195,7 @@ inline void ThreadEntities() {
             threatPlayers = 0;
             for (const auto& entity : *next) {
                 if (entity.type == SKJH_PLAYER && !entity.isLocalPlayer &&
+                    !SKJH_ShouldHideDeadActor(entity) &&
                     entity.distance < 100.0f) {
                     ++threatPlayers;
                 }
@@ -1200,7 +1234,6 @@ inline void ThreadPlayerPositions() {
             auto next = std::make_shared<SKJH_PlayerPositionMap>();
             if (entities) {
                 next->reserve((std::min)(entities->size(), size_t{128}));
-                const auto sampledAt = std::chrono::steady_clock::now();
                 for (const auto& entity : *entities) {
                     if (!g_Running.load()) break;
                     if (entity.type != SKJH_PLAYER ||
@@ -1213,10 +1246,40 @@ inline void ThreadPlayerPositions() {
 
                     const FVector position =
                         SKJH_GetPosition(entity.entity, entity.klass);
+                    const auto sampledAt = std::chrono::steady_clock::now();
                     const bool positionValid = SKJH_IsFiniteVector(position) &&
                         (position.X != 0.0f || position.Y != 0.0f ||
                          position.Z != 0.0f);
                     if (positionValid) {
+                        if (previous) {
+                            const auto old = previous->find(entityKey);
+                            if (old != previous->end() &&
+                                old->second.entity == entity.entity &&
+                                SKJH_ClassHashCompatible(
+                                    old->second.classHash, entity.classHash)) {
+                                const float dx = position.X - old->second.position.X;
+                                const float dy = position.Y - old->second.position.Y;
+                                const float dz = position.Z - old->second.position.Z;
+                                const float displacementSq = dx*dx + dy*dy + dz*dz;
+                                const float elapsed = (std::max)(0.001f,
+                                    std::chrono::duration<float>(
+                                        sampledAt - old->second.sampledAt).count());
+                                // Entity properties advance in network-sized
+                                // steps. Only reject an implausible pointer/
+                                // dataset glitch; accepting normal multi-metre
+                                // steps keeps the overlay in sync with motion.
+                                const float maximumDisplacement =
+                                    (std::max)(25.0f, elapsed * 250.0f);
+                                if (std::isfinite(displacementSq) &&
+                                    displacementSq > maximumDisplacement *
+                                        maximumDisplacement &&
+                                    sampledAt - old->second.sampledAt <
+                                        std::chrono::milliseconds(100)) {
+                                    (*next)[entityKey] = old->second;
+                                    continue;
+                                }
+                            }
+                        }
                         (*next)[entityKey] = {
                             entity.entity, entity.classHash, position, sampledAt};
                         continue;
@@ -1368,11 +1431,6 @@ inline void ThreadBones() {
         const bool aimNeedsBones = SKJH_GetAimConfigSnapshot().enabled;
         const uint8_t skeletonCategoryMask = g_SkeletonCategoryMask.load(
             std::memory_order_acquire);
-        if (!aimNeedsBones &&
-            !g_SkeletonSamplingEnabled.load(std::memory_order_acquire)) {
-            throttler.sleepUntilNext(std::chrono::milliseconds(150));
-            continue;
-        }
         std::shared_ptr<std::vector<SKJH_EntityEntry>> data;
         { std::shared_lock<std::shared_mutex> lk(g_DataMutex); data = g_Entities; }
         if (!data || data->empty()) {
@@ -1393,20 +1451,118 @@ inline void ThreadBones() {
             previousRoots = g_PlayerRoots;
         }
         const auto rootPassStartedAt = std::chrono::steady_clock::now();
+        struct RootPending {
+            int64_t key = 0;
+            DWORD64 entity = 0;
+            int32_t classHash = 0;
+            FVector entityPosition{};
+        };
+        std::vector<SKJH_PlayerRootBatchRequest> rootRequests;
+        std::vector<RootPending> rootPending;
+        rootRequests.reserve(data->size());
+        rootPending.reserve(data->size());
         for (const auto& entity : *data) {
             if (!g_Running.load()) break;
             if (!SKJH_HasBones(entity.type) || !entity.entityId) continue;
             const int64_t key = SKJH_GetEntitySnapshotKey(
                 entity.entityId, entity.entity);
-            FVector root{};
             const auto go = goMap.find(entity.entityId);
-            if (go != goMap.end() &&
-                SKJH_ReadPlayerRoot(go->second, entity.entity, root)) {
-                const auto sampledAt = std::chrono::steady_clock::now();
-                rootUpdates->emplace(key, SKJH_PlayerRootSample{
-                    entity.entity, entity.classHash, root, sampledAt});
+            if (go == goMap.end()) continue;
+            rootRequests.push_back({go->second, entity.entity});
+            rootPending.push_back({key, entity.entity, entity.classHash,
+                                   entity.pos});
+        }
+        std::vector<SKJH_PlayerRootBatchResult> rootResults;
+        SKJH_ReadPlayerRootsBatch(rootRequests, rootResults);
+        const auto rootBatchSampledAt = std::chrono::steady_clock::now();
+        int rootAcceptedCount = 0;
+        int rootRetainedCount = 0;
+        int rootRejectedCount = 0;
+        int rootSpatialRejectCount = 0;
+        int rootMotionRejectCount = 0;
+        for (size_t index = 0;
+             index < rootPending.size() && index < rootResults.size(); ++index) {
+            const RootPending& pending = rootPending[index];
+            if (!rootResults[index].valid ||
+                !SKJH_IsFiniteVector(rootResults[index].position)) {
+                ++rootRejectedCount;
                 continue;
             }
+
+            const SKJH_PlayerRootSample* previousSample = nullptr;
+            if (previousRoots) {
+                const auto previous = previousRoots->find(pending.key);
+                if (previous != previousRoots->end() &&
+                    previous->second.entity == pending.entity &&
+                    SKJH_ClassHashCompatible(
+                        previous->second.classHash, pending.classHash) &&
+                    SKJH_IsFiniteVector(previous->second.position)) {
+                    previousSample = &previous->second;
+                }
+            }
+
+            const FVector& candidate = rootResults[index].position;
+            const FVector& property = pending.entityPosition;
+            const float propertyDx = candidate.X - property.X;
+            const float propertyDy = candidate.Y - property.Y;
+            const float propertyDz = candidate.Z - property.Z;
+            const float propertyDeltaSq = propertyDx * propertyDx +
+                propertyDy * propertyDy + propertyDz * propertyDz;
+            const bool propertyFinite = SKJH_IsFiniteVector(property) &&
+                std::isfinite(propertyDeltaSq);
+            // RootBone and the entity property are normally within a few
+            // metres. This catches a finite but torn Transform hierarchy.
+            const bool spatiallyCoherent = propertyFinite &&
+                propertyDeltaSq <= 400.0f;
+
+            bool motionCoherent = false;
+            float frameDelta = -1.0f;
+            if (previousSample) {
+                const float dx = candidate.X - previousSample->position.X;
+                const float dy = candidate.Y - previousSample->position.Y;
+                const float dz = candidate.Z - previousSample->position.Z;
+                const float deltaSq = dx * dx + dy * dy + dz * dz;
+                frameDelta = std::sqrt((std::max)(0.0f, deltaSq));
+                const float elapsed = (std::max)(0.001f,
+                    std::chrono::duration<float>(
+                        rootBatchSampledAt - previousSample->sampledAt).count());
+                // Allow ordinary movement and a teleport corroborated by the
+                // entity property, while rejecting an isolated DMA jump.
+                const float maximumJump = (std::min)(50.0f,
+                    (std::max)(5.0f, elapsed * 250.0f));
+                motionCoherent = std::isfinite(deltaSq) &&
+                    deltaSq <= maximumJump * maximumJump;
+            }
+
+            const bool accepted = previousSample
+                ? (motionCoherent || spatiallyCoherent)
+                : spatiallyCoherent;
+            if (!accepted) {
+                ++rootRejectedCount;
+                if (!spatiallyCoherent) ++rootSpatialRejectCount;
+                if (previousSample && !motionCoherent)
+                    ++rootMotionRejectCount;
+                continue;
+            }
+
+            SKJH_PlayerRootSample sample{};
+            sample.entity = pending.entity;
+            sample.classHash = pending.classHash;
+            sample.position = candidate;
+            sample.entityPosition = property;
+            sample.entityDelta = propertyFinite
+                ? std::sqrt((std::max)(0.0f, propertyDeltaSq)) : -1.0f;
+            sample.frameDelta = frameDelta;
+            sample.sampledAt = rootBatchSampledAt;
+            rootUpdates->emplace(pending.key, std::move(sample));
+            ++rootAcceptedCount;
+        }
+        for (const auto& entity : *data) {
+            if (!g_Running.load()) break;
+            if (!SKJH_HasBones(entity.type) || !entity.entityId) continue;
+            const int64_t key = SKJH_GetEntitySnapshotKey(
+                entity.entityId, entity.entity);
+            if (rootUpdates->find(key) != rootUpdates->end()) continue;
             if (!previousRoots) continue;
             const auto previous = previousRoots->find(key);
             const auto retainAt = std::chrono::steady_clock::now();
@@ -1415,16 +1571,44 @@ inline void ThreadBones() {
                 SKJH_ClassHashCompatible(
                     previous->second.classHash, entity.classHash) &&
                 retainAt - previous->second.sampledAt <=
-                    SKJH_PlayerRootFreshnessWindow()) {
-                rootUpdates->emplace(key, previous->second);
+                    SKJH_PlayerRootDisplayWindow()) {
+                SKJH_PlayerRootSample retained = previous->second;
+                ++retained.retainedPasses;
+                rootUpdates->emplace(key, std::move(retained));
+                ++rootRetainedCount;
             }
         }
         const auto rootPassCompletedAt = std::chrono::steady_clock::now();
         const auto rootPassDurationMs = std::chrono::duration_cast<
             std::chrono::milliseconds>(
                 rootPassCompletedAt - rootPassStartedAt).count();
+        int rootValidCount = 0;
+        for (const auto& sample : *rootUpdates) {
+            if (sample.second.sampledAt !=
+                std::chrono::steady_clock::time_point{}) {
+                ++rootValidCount;
+            }
+        }
+        g_PlayerRootLastMapCount.store(
+            static_cast<int>(rootUpdates->size()), std::memory_order_release);
+        g_PlayerRootLastValidCount.store(rootValidCount,
+                                         std::memory_order_release);
+        g_PlayerRootLastPassMs.store(rootPassDurationMs,
+                                     std::memory_order_release);
+        g_PlayerRootLastRequestCount.store(
+            static_cast<int>(rootRequests.size()), std::memory_order_release);
+        g_PlayerRootLastAcceptedCount.store(rootAcceptedCount,
+                                            std::memory_order_release);
+        g_PlayerRootLastRetainedCount.store(rootRetainedCount,
+                                            std::memory_order_release);
+        g_PlayerRootLastRejectedCount.store(rootRejectedCount,
+                                            std::memory_order_release);
+        g_PlayerRootLastSpatialRejectCount.store(rootSpatialRejectCount,
+                                                 std::memory_order_release);
+        g_PlayerRootLastMotionRejectCount.store(rootMotionRejectCount,
+                                                std::memory_order_release);
         const int64_t measuredRootFreshnessMs = (std::clamp)(
-            rootPassDurationMs * 2 + 50, int64_t{750}, int64_t{5000});
+            rootPassDurationMs * 2 + 50, int64_t{250}, int64_t{2000});
         const int64_t previousRootFreshnessMs =
             g_PlayerRootFreshnessMs.load(std::memory_order_acquire);
         g_PlayerRootFreshnessMs.store((std::max)(measuredRootFreshnessMs,
@@ -1432,6 +1616,16 @@ inline void ThreadBones() {
         {
             std::lock_guard<std::shared_mutex> lock(g_PlayerRootMutex);
             g_PlayerRoots = std::move(rootUpdates);
+        }
+
+        // RootBone is also the live actor anchor for ESP boxes. Keep this
+        // lightweight pass running even when full skeleton rendering is off;
+        // the expensive pose walk remains opt-in for skeleton/aim features.
+        if (!aimNeedsBones &&
+            !g_SkeletonSamplingEnabled.load(std::memory_order_acquire)) {
+            throttler.sleepUntilNext(
+                std::chrono::milliseconds(SleepPlayerRoots()));
+            continue;
         }
 
         const size_t entityCount = data->size();
@@ -2175,6 +2369,16 @@ inline void DrawESP() {
     if (!dl) return;
     const int sw = g_ScreenW;
     const int sh = g_ScreenH;
+    std::shared_ptr<const SKJH_PlayerPositionMap> playerPositions;
+    {
+        std::shared_lock<std::shared_mutex> lock(g_PlayerPositionMutex);
+        playerPositions = g_PlayerPositions;
+    }
+    std::shared_ptr<const SKJH_PlayerRootMap> playerRoots;
+    {
+        std::shared_lock<std::shared_mutex> lock(g_PlayerRootMutex);
+        playerRoots = g_PlayerRoots;
+    }
 
     // ── Render diagnostic: capture rendering state every ~2s ──
     static int s_renderDiagFrame = 0;
@@ -2209,8 +2413,32 @@ inline void DrawESP() {
                  << ", \"typeMonsterEnabled\": " << (g_TypeEnabled[SKJH_MONSTER] ? "true" : "false")
                  << ", \"typeNpcEnabled\": " << (g_TypeEnabled[SKJH_NPC] ? "true" : "false")
                  << "},\n";
+            diag << "  \"rootSampler\": {\"mapCount\": "
+                 << g_PlayerRootLastMapCount.load(std::memory_order_acquire)
+                 << ", \"validCount\": "
+                 << g_PlayerRootLastValidCount.load(std::memory_order_acquire)
+                 << ", \"requestCount\": "
+                 << g_PlayerRootLastRequestCount.load(std::memory_order_acquire)
+                 << ", \"acceptedCount\": "
+                 << g_PlayerRootLastAcceptedCount.load(std::memory_order_acquire)
+                 << ", \"retainedCount\": "
+                 << g_PlayerRootLastRetainedCount.load(std::memory_order_acquire)
+                 << ", \"rejectedCount\": "
+                 << g_PlayerRootLastRejectedCount.load(std::memory_order_acquire)
+                 << ", \"spatialRejectCount\": "
+                 << g_PlayerRootLastSpatialRejectCount.load(std::memory_order_acquire)
+                 << ", \"motionRejectCount\": "
+                 << g_PlayerRootLastMotionRejectCount.load(std::memory_order_acquire)
+                 << ", \"lastPassMs\": "
+                 << g_PlayerRootLastPassMs.load(std::memory_order_acquire)
+                 << ", \"freshnessMs\": "
+                 << g_PlayerRootFreshnessMs.load(std::memory_order_acquire)
+                 << ", \"displayWindowMs\": "
+                 << SKJH_PlayerRootDisplayWindow().count()
+                 << "},\n";
             const int diagEntityCount = diagData ? static_cast<int>(diagData->size()) : 0;
             int diagPlayerCount = 0, diagPlayersWithBones = 0, diagPlayersWithFreshBones = 0;
+            int diagUnityRootCount = 0, diagPlayerPropertyCount = 0;
             diag << "  \"entities\": {\n";
             diag << "    \"total\": " << diagEntityCount << ",\n";
             diag << "    \"players\": [";
@@ -2219,6 +2447,50 @@ inline void DrawESP() {
                 for (const auto& e : *diagData) {
                     if (e.type != SKJH_PLAYER) continue;
                     ++diagPlayerCount;
+                    FVector diagPosition = e.pos;
+                    const char* diagPositionSource = "entity_property";
+                    int64_t diagPositionAgeMs = -1;
+                    float diagRootEntityDelta = -1.0f;
+                    float diagRootFrameDelta = -1.0f;
+                    uint32_t diagRootRetainedPasses = 0;
+                    const auto diagKey = SKJH_GetEntitySnapshotKey(
+                        e.entityId, e.entity);
+                    if (playerRoots) {
+                        const auto root = playerRoots->find(diagKey);
+                        if (root != playerRoots->end() &&
+                            root->second.entity == e.entity &&
+                            SKJH_ClassHashCompatible(
+                                root->second.classHash, e.classHash)) {
+                            diagRootEntityDelta = root->second.entityDelta;
+                            diagRootFrameDelta = root->second.frameDelta;
+                            diagRootRetainedPasses = root->second.retainedPasses;
+                            if (renderDiagNow - root->second.sampledAt <=
+                                    SKJH_PlayerRootDisplayWindow()) {
+                                diagPosition = root->second.position;
+                                diagPositionSource = "unity_root";
+                                diagPositionAgeMs = std::chrono::duration_cast<
+                                    std::chrono::milliseconds>(
+                                        renderDiagNow - root->second.sampledAt).count();
+                            }
+                        }
+                    }
+                    if (diagPositionSource[0] == 'e' && playerPositions) {
+                        const auto sample = playerPositions->find(diagKey);
+                        if (sample != playerPositions->end() &&
+                            sample->second.entity == e.entity &&
+                            SKJH_ClassHashCompatible(
+                                sample->second.classHash, e.classHash) &&
+                            renderDiagNow - sample->second.sampledAt <=
+                                SKJH_PLAYER_POSITION_TTL) {
+                            diagPosition = sample->second.position;
+                            diagPositionSource = "player_property";
+                            diagPositionAgeMs = std::chrono::duration_cast<
+                                std::chrono::milliseconds>(
+                                    renderDiagNow - sample->second.sampledAt).count();
+                        }
+                    }
+                    if (diagPositionSource[0] == 'u') ++diagUnityRootCount;
+                    if (diagPositionSource[0] == 'p') ++diagPlayerPropertyCount;
                     int validBones = 0, freshBones = 0;
                     for (int b = 0; b < BONE_COUNT; ++b) {
                         if (e.boneValid[b]) ++validBones;
@@ -2229,7 +2501,13 @@ inline void DrawESP() {
                     if (!firstPlayer) diag << ',';
                     firstPlayer = false;
                     diag << "\n      {\"id\": " << e.entityId
-                         << ", \"pos\": [" << e.pos.X << ',' << e.pos.Y << ',' << e.pos.Z << ']'
+                         << ", \"pos\": [" << diagPosition.X << ',' << diagPosition.Y << ',' << diagPosition.Z << ']'
+                         << ", \"entityPos\": [" << e.pos.X << ',' << e.pos.Y << ',' << e.pos.Z << ']'
+                         << ", \"positionSource\": \"" << diagPositionSource << '"'
+                         << ", \"positionAgeMs\": " << diagPositionAgeMs
+                         << ", \"rootEntityDelta\": " << diagRootEntityDelta
+                         << ", \"rootFrameDelta\": " << diagRootFrameDelta
+                         << ", \"rootRetainedPasses\": " << diagRootRetainedPasses
                          << ", \"hasBones\": " << (e.hasBones ? "true" : "false")
                          << ", \"validBones\": " << validBones
                          << ", \"freshBones\": " << freshBones
@@ -2289,7 +2567,11 @@ inline void DrawESP() {
                  << "},\n";
             diag << "  \"summary\": {\"players\": " << diagPlayerCount
                  << ", \"withBones\": " << diagPlayersWithBones
-                 << ", \"withFreshBones\": " << diagPlayersWithFreshBones << "}\n";
+                 << ", \"withFreshBones\": " << diagPlayersWithFreshBones
+                 << ", \"visibleCount\": " << g_VisibleCount
+                 << ", \"unityRootCount\": " << diagUnityRootCount
+                 << ", \"playerPropertyCount\": " << diagPlayerPropertyCount
+                 << "}\n";
             diag << "}\n";
             diag.close();
         }
@@ -2320,16 +2602,6 @@ inline void DrawESP() {
         std::shared_lock<std::shared_mutex> lk(g_DataMutex);
         data = g_Entities;
         threatLevel = g_ThreatLevel;
-    }
-    std::shared_ptr<const SKJH_PlayerPositionMap> playerPositions;
-    {
-        std::shared_lock<std::shared_mutex> lock(g_PlayerPositionMutex);
-        playerPositions = g_PlayerPositions;
-    }
-    std::shared_ptr<const SKJH_PlayerRootMap> playerRoots;
-    {
-        std::shared_lock<std::shared_mutex> lock(g_PlayerRootMutex);
-        playerRoots = g_PlayerRoots;
     }
     if (!data || data->empty()) {
         g_VisibleCount = 0;
@@ -2377,17 +2649,31 @@ inline void DrawESP() {
     const auto resolveRenderPosition =
         [&](const SKJH_EntityEntry& entity) {
             FVector position = entity.pos;
-            if (entity.type != SKJH_PLAYER || !playerPositions)
+            if (entity.type != SKJH_PLAYER)
                 return position;
-            const auto sample = playerPositions->find(
-                SKJH_GetEntitySnapshotKey(entity.entityId, entity.entity));
-            if (sample != playerPositions->end() &&
-                sample->second.entity == entity.entity &&
-                SKJH_ClassHashCompatible(
-                    sample->second.classHash, entity.classHash) &&
-                positionNow - sample->second.sampledAt <=
-                    SKJH_PLAYER_POSITION_TTL) {
-                position = sample->second.position;
+            const auto key = SKJH_GetEntitySnapshotKey(
+                entity.entityId, entity.entity);
+            if (playerRoots) {
+                const auto root = playerRoots->find(key);
+                if (root != playerRoots->end() &&
+                    root->second.entity == entity.entity &&
+                    SKJH_ClassHashCompatible(
+                        root->second.classHash, entity.classHash) &&
+                    positionNow - root->second.sampledAt <=
+                        SKJH_PlayerRootDisplayWindow()) {
+                    return root->second.position;
+                }
+            }
+            if (playerPositions) {
+                const auto sample = playerPositions->find(key);
+                if (sample != playerPositions->end() &&
+                    sample->second.entity == entity.entity &&
+                    SKJH_ClassHashCompatible(
+                        sample->second.classHash, entity.classHash) &&
+                    positionNow - sample->second.sampledAt <=
+                        SKJH_PLAYER_POSITION_TTL) {
+                    return sample->second.position;
+                }
             }
             return position;
         };
@@ -2396,6 +2682,7 @@ inline void DrawESP() {
     if (sortedEntities.capacity() < data->size())
         sortedEntities.reserve(data->size());
     for (auto& e : *data) {
+        if (SKJH_ShouldHideDeadActor(e)) continue;
         if (!g_DrawSelf && e.isLocalPlayer) continue;
         if (e.type < 0 || e.type >= SKJH_TYPE_COUNT) continue;
         if (!g_TypeEnabled[e.type]) continue;
@@ -2570,7 +2857,7 @@ inline void DrawESP() {
                         SKJH_ClassHashCompatible(
                             root->second.classHash, e.classHash) &&
                         positionNow - root->second.sampledAt <=
-                            SKJH_PlayerRootFreshnessWindow()) {
+                            SKJH_PlayerRootDisplayWindow()) {
                         currentRoot = root->second.position;
                         currentRootValid = SKJH_IsFiniteVector(currentRoot);
                         currentRootSampledAt = root->second.sampledAt;

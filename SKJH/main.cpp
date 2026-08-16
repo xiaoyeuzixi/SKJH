@@ -33,6 +33,7 @@ void SignalHandler(int) {
 #include "Mem.h"
 #include "Overlay.h"
 #include "Diagnostics.h"
+#include "MemoryExport.h"
 #include "main.h"
 #include <cctype>
 #include <filesystem>
@@ -230,16 +231,12 @@ static void DrawUI() {
                 ImGui::TableNextColumn(); HoloCheckbox(L(u8"距离", "Distance"), &g_ShowDistance);
                 ImGui::TableNextColumn(); HoloCheckbox(L(u8"名称", "Name"), &g_ShowName);
                 ImGui::TableNextColumn(); HoloCheckbox(L(u8"射线", "Rays"), &g_ShowRays);
-                ImGui::TableNextColumn(); HoloCheckbox(L(u8"真人骨骼", "Player Skeleton"), &g_ShowPlayerSkeleton);
-                ImGui::TableNextColumn(); HoloCheckbox(L(u8"人机骨骼", "Bot Skeleton"), &g_ShowBotSkeleton);
                 ImGui::TableNextColumn(); HoloCheckbox(L(u8"实体ID", "Entity ID"), &g_ShowEntityId);
                 ImGui::TableNextColumn(); HoloCheckbox(L(u8"威胁警告", "Threat Warning"), &g_ShowThreatWarn);
                 ImGui::TableNextColumn(); HoloCheckbox(L(u8"绘制自己", "Draw Self"), &g_DrawSelf);
                 ImGui::TableNextColumn(); HoloCheckbox(L(u8"物资总开关", "All Loot"), &g_ShowItems);
                 ImGui::EndTable();
             }
-            SKJH_UpdateSkeletonSamplingState();
-
             HoloSeparator();
 
             HoloHeader(L(u8"全局设置", "Global Settings"));
@@ -711,6 +708,12 @@ int main(int argc, char** argv) {
     bool signatureCheck = false;
     bool configCheck = false;
     bool uiPreview = false;
+    bool dmaCheck = false;
+    bool memoryExport = false;
+    bool exportFunctions = false;
+    std::string targetProcess = "SKJH.exe";
+    std::string exportModule = "GameAssembly.dll";
+    std::filesystem::path exportOutput = "dma_export";
     DWORD probeTimeoutMs = 30000;
     std::filesystem::path probeOutput = "dma_probe.json";
     for (int index = 1; index < argc; ++index) {
@@ -722,15 +725,32 @@ int main(int argc, char** argv) {
         else if (argument == "--player-probe") playerIntelProbe = true;
         else if (argument == "--config-check") configCheck = true;
         else if (argument == "--ui-preview") uiPreview = true;
+        else if (argument == "--dma-check" || argument == "--process-list") dmaCheck = true;
+        else if (argument == "--memory-export") memoryExport = true;
+        else if (argument == "--export-functions") exportFunctions = true;
+        else if (argument.rfind("--memory-export=", 0) == 0) {
+            memoryExport = true;
+            exportModule = argument.substr(16);
+        }
+        else if (argument.rfind("--export-functions=", 0) == 0) {
+            exportFunctions = true;
+            exportModule = argument.substr(19);
+        }
+        else if (argument.rfind("--target-process=", 0) == 0)
+            targetProcess = argument.substr(17);
+        else if (argument.rfind("--export-out=", 0) == 0)
+            exportOutput = argument.substr(13);
         else if (argument.rfind("--timeout=", 0) == 0)
             probeTimeoutMs = static_cast<DWORD>(std::strtoul(argument.c_str() + 10, nullptr, 10));
         else if (argument.rfind("--probe-out=", 0) == 0)
             probeOutput = argument.substr(12);
     }
 
-    // Production startup uses only the offsets compiled into this binary.
-    // External SDK files are loaded solely by explicit developer diagnostics.
-    const bool sdkLoaded = sdkCheck ? LoadSdkManifest() : SdkManifestIsSane();
+    // Load the active SDK cache on every startup. The resolver selects the
+    // 8.16 export when present and falls back to the compiled profile when the
+    // export directory is absent, so normal rendering and diagnostics use the
+    // same version rather than silently mixing builds.
+    const bool sdkLoaded = LoadSdkManifest();
     if (sdkCheck) {
         printf("%s\n", SdkManifestSummary().c_str());
         printf("script.json: %s\n", g_RuntimeOffsets.scriptPath.string().c_str());
@@ -768,7 +788,7 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lock(g_AimConfigMutex);
             g_AimConfig = probeAim;
         }
-        g_ShowPlayerSkeleton = true;
+        g_ShowPlayerSkeleton = false;
         g_ShowBotSkeleton = false;
         SKJH_UpdateSkeletonSamplingState();
         const bool saved = SaveGlobalConfig();
@@ -778,7 +798,7 @@ int main(int argc, char** argv) {
         }
         const bool reloaded = LoadGlobalConfig();
         const bool skeletonRoundTrip =
-            g_ShowPlayerSkeleton && !g_ShowBotSkeleton && g_ShowSkeleton;
+            !g_ShowPlayerSkeleton && !g_ShowBotSkeleton && !g_ShowSkeleton;
         const SKJH_AimConfig roundTripAim =
             SKJH_GetAimConfigSnapshot();
         const bool rawHidRoundTrip =
@@ -819,6 +839,48 @@ int main(int argc, char** argv) {
             ? 0 : 5;
     }
 
+    // Device/process diagnostics deliberately do not wait for a target. This
+    // separates a missing remote game process from a DMA initialization error.
+    if (dmaCheck) {
+        LPCSTR deviceArgs[] = {"", "-device", "fpga://algo=0"};
+        VMM_HANDLE handle = VMMDLL_Initialize(3, deviceArgs);
+        if (!handle) {
+            printf("DMA check: initialize failed (device=fpga://algo=0)\n");
+            return 3;
+        }
+        PVMMDLL_PROCESS_INFORMATION processes = nullptr;
+        DWORD processCount = 0;
+        const bool listed = VMMDLL_ProcessGetInformationAll(
+            handle, &processes, &processCount) && processes;
+        bool targetFound = false;
+        DWORD targetPid = 0;
+        DWORD64 gameAssembly = 0;
+        if (listed) {
+            printf("DMA check: device=ok processes=%lu target=%s\n",
+                   static_cast<unsigned long>(processCount), targetProcess.c_str());
+            for (DWORD index = 0; index < processCount; ++index) {
+                const auto& process = processes[index];
+                if (_stricmp(process.szName, targetProcess.c_str()) != 0)
+                    continue;
+                targetFound = true;
+                targetPid = process.dwPID;
+                gameAssembly = VMMDLL_ProcessGetModuleBaseU(
+                    handle, targetPid, (LPSTR)"GameAssembly.dll");
+                printf("DMA check: target=found pid=%lu name=%s GameAssembly=%s\n",
+                       static_cast<unsigned long>(targetPid), process.szName,
+                       gameAssembly ? "found" : "missing");
+                break;
+            }
+            if (!targetFound)
+                printf("DMA check: target=missing name=%s\n", targetProcess.c_str());
+        } else {
+            printf("DMA check: process enumeration failed\n");
+        }
+        if (processes) VMMDLL_MemFree(processes);
+        VMMDLL_Close(handle);
+        return listed && targetFound && gameAssembly ? 0 : 4;
+    }
+
     if (uiPreview) {
         g_lang = 0;
         LoadGlobalConfig();
@@ -826,15 +888,37 @@ int main(int argc, char** argv) {
         return OverlayRun(Render, g_DisplayMode);
     }
 
+    if (memoryExport || exportFunctions) {
+        if (!mem.Init(targetProcess.c_str(), probeTimeoutMs)) {
+            printf("DMA export: target process was not found within %lu ms.\n",
+                   probeTimeoutMs);
+            return 3;
+        }
+        SKJH_MemoryExportStats stats;
+        const bool imageOk = !memoryExport ||
+            SKJH_ExportModuleMemory(exportModule, exportOutput, stats);
+        const bool eatOk = !exportFunctions ||
+            (stats.exportCount > 0 ||
+             SKJH_ExportModuleFunctions(exportModule, exportOutput, stats));
+        printf("DMA export: image=%s exports=%s module=%s base=%s size=%llu out=%s\n",
+               imageOk ? "ok" : "failed", eatOk ? "ok" : "failed",
+               exportModule.c_str(),
+               SKJH_MemoryExportDetail::Hex(stats.base).c_str(),
+               static_cast<unsigned long long>(stats.imageSize),
+               exportOutput.string().c_str());
+        mem.Close();
+        return imageOk && eatOk ? 0 : 4;
+    }
+
     if (signatureCheck) {
-        if (!mem.Init("SKJH.exe", probeTimeoutMs)) return 3;
+        if (!mem.Init(targetProcess.c_str(), probeTimeoutMs)) return 3;
         const bool found = SKJH_ResolveRuntimeTypeInfoSignatures(true);
         mem.Close();
         return found ? 0 : 4;
     }
 
     if (boneProbe) {
-        if (!mem.Init("SKJH.exe", probeTimeoutMs)) {
+        if (!mem.Init(targetProcess.c_str(), probeTimeoutMs)) {
             printf("Bone probe: target process was not found within %lu ms.\n",
                    probeTimeoutMs);
             return 3;
@@ -851,7 +935,7 @@ int main(int argc, char** argv) {
     }
 
     if (dmaProbe || playerIntelProbe) {
-        if (!mem.Init("SKJH.exe", probeTimeoutMs)) {
+        if (!mem.Init(targetProcess.c_str(), probeTimeoutMs)) {
             printf("DMA probe: target process was not found within %lu ms.\n", probeTimeoutMs);
             return 3;
         }
@@ -875,7 +959,7 @@ int main(int argc, char** argv) {
     LoadGlobalConfig();
     ShowWindow(GetConsoleWindow(), SW_HIDE);
 
-    if (!mem.Init("SKJH.exe", 15000)) {
+    if (!mem.Init(targetProcess.c_str(), 15000)) {
         MessageBoxW(nullptr, L"未找到目标进程或 DMA 设备。",
                     L"SKJH", MB_OK | MB_ICONERROR);
         return 1;

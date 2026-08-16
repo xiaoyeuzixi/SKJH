@@ -120,6 +120,7 @@ copy /Y "$(ProjectDir)FTD3XX.dll" "$(OutDir)FTD3XX.dll"</Command>
     <ClInclude Include="Throttler.h" />
     <ClInclude Include="DMAKey.h" />
     <ClInclude Include="Diagnostics.h" />
+    <ClInclude Include="MemoryExport.h" />
     <ClInclude Include="dma_kapi.h" />
     <ClInclude Include="leechcore.h" />
     <ClInclude Include="vmmdll.h" />

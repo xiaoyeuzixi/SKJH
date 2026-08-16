@@ -11,12 +11,15 @@ bone_probe*.json
 dma_probe*.json
 player_*probe*.json
 ui_preview_*.png
+dynamic_validation_*.png
 skjh_sdk.cache
 DummyDll/
 DummyDll.7z
+SKJH DummyDll 8.16.7z
 SKJH SDK 7.23/
 SKJH SDK 7.23.7z
 dump.cs
 il2cpp.h
 script.json
 stringliteral.json
+*.png

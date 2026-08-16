@@ -17,13 +17,13 @@
 
 #pragma comment(lib, "bcrypt.lib")
 
-// Runtime SDK manifest. Defaults match the SDK dumped on 2026-07-31; when
+// Runtime SDK manifest. Defaults match the active 8.16 SDK export; when
 // script.json/dump.cs are present, LoadSdkManifest replaces these values.
 struct SKJH_RuntimeOffsets {
-    uint64_t entityManagerTypeInfo = 0x90E46C8;
-    uint64_t mcTypeInfo            = 0x9142918;
-    uint64_t mcCommonTypeInfo      = 0x9142C50;
-    uint64_t languageManagerTypeInfo = 0x92F4EF0;
+    uint64_t entityManagerTypeInfo = 0x9121690;
+    uint64_t mcTypeInfo            = 0x917FF50;
+    uint64_t mcCommonTypeInfo      = 0x9180280;
+    uint64_t languageManagerTypeInfo = 0x93335E8;
 
     uint32_t il2cppClassName         = 0x10;
     uint32_t il2cppClassNamespace    = 0x18;
@@ -181,6 +181,8 @@ struct SKJH_TypeInfoRvaProfile {
 // moved these four generated TypeInfo slots, so select the matching compiled
 // profile by runtime class identity instead of reading external SDK files.
 inline constexpr SKJH_TypeInfoRvaProfile SKJH_CompiledTypeInfoProfiles[] = {
+    {0x9121690, 0x917FF50, 0x9180280, 0x93335E8}, // 8.16 export
+    {0x911E510, 0x917CDD0, 0x917D100, 0x93303B8}, // 8.8 export
     {0x90E46C8, 0x9142918, 0x9142C50, 0x92F4EF0}, // 2026-07-31 SDK
     {0x90E60A0, 0x91442F0, 0x9144628, 0x92F6930}, // 2026-07-23 SDK
     {0x90E0C10, 0x913EE70, 0x913F1A8, 0x92F12B0}, // previous live build
@@ -253,6 +255,10 @@ inline std::vector<std::filesystem::path> CandidatePaths(const wchar_t* filename
     // recursive scan of the workspace (the JSON export is hundreds of MB).
     auto addPreferred = [&](const std::filesystem::path& root) {
         if (root.empty()) return;
+        // Prefer the active 8.16 export when it is present. Older exports stay
+        // in the search list for offline diagnostics and rollback checks.
+        result.emplace_back(root / L"SKJH DummyDll 8.16" / filename);
+        result.emplace_back(root / L"SKJH 8.8 DummyDll" / filename);
         result.emplace_back(root / L"DummyDll" / filename);
         result.emplace_back(root / L"SKJH SDK 7.23" / L"DummyDll" / filename);
         result.emplace_back(root / L"SKJH SDK 7.23" / filename);
