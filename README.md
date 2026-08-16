@@ -9,7 +9,14 @@
 - 自动化 SDK 导出与签名探测
 - 运行时诊断与验证工具链
 
-## 编译
+## 快速开始
+
+### 1. 下载 SDK 依赖
+
+从 [GitHub Release v8.16](https://github.com/xiaoyeuzixi/SKJH/releases/tag/v8.16) 下载
+`SKJH DummyDll 8.16.7z`，解压后将 `SKJH DummyDll 8.16/` 文件夹放到项目根目录。
+
+### 2. 编译
 
 在 Visual Studio 中打开 `SKJH.sln`，选择 `Release | x64` 进行编译，或通过命令行运行：
 
